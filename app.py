@@ -2,7 +2,7 @@ import streamlit as st
 import spacy
 from transformers import pipeline
 from collections import defaultdict
-import math
+import re
 
 # --------------------------------------------------
 # Page config
@@ -38,9 +38,19 @@ DISCLAIMER = (
 
 TARGET_LABELS = {"DISEASE", "DRUG", "DATE", "PROCEDURE", "ORG"}
 
-MAX_WORDS_PER_CHUNK = 400   # safe for BART
-SUMMARY_MAX_LEN = 120
-SUMMARY_MIN_LEN = 40
+# --------------------------------------------------
+# Text normalization (CRITICAL FIX)
+# --------------------------------------------------
+def normalize_text(text):
+    """
+    Fix missing spaces from PDFs / OCR / bad copy-paste.
+    """
+    text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
+    text = re.sub(r'([.,;:])([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'(\d)([A-Za-z])', r'\1 \2', text)
+    text = re.sub(r'([A-Za-z])(\d)', r'\1 \2', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
 # --------------------------------------------------
 # NLP helpers
@@ -56,66 +66,47 @@ def extract_entities(text):
     return entities
 
 
-def split_text_into_chunks(text, max_words=MAX_WORDS_PER_CHUNK):
-    words = text.split()
-    chunks = []
-
-    for i in range(0, len(words), max_words):
-        chunk = " ".join(words[i:i + max_words])
-        chunks.append(chunk)
-
-    return chunks
-
-
 def summarize_large_report(text):
     if not text or len(text.split()) < 80:
         return text
 
     summaries = []
 
-    # Tokenizer-aware chunking
-    max_input_tokens = 900  # keep well below 1024
     tokenizer = summarizer.tokenizer
+    max_input_tokens = 900  # well below BART limit (1024)
 
-    inputs = tokenizer(
+    tokens = tokenizer(
         text,
         return_tensors="pt",
         truncation=False
-    )
+    )["input_ids"][0]
 
-    input_ids = inputs["input_ids"][0]
-
-    for i in range(0, len(input_ids), max_input_tokens):
-        chunk_ids = input_ids[i:i + max_input_tokens]
-
-        chunk_text = tokenizer.decode(
-            chunk_ids,
-            skip_special_tokens=True
-        )
+    for i in range(0, len(tokens), max_input_tokens):
+        chunk_ids = tokens[i:i + max_input_tokens]
+        chunk_text = tokenizer.decode(chunk_ids, skip_special_tokens=True)
 
         try:
-            summary = summarizer(
+            result = summarizer(
                 chunk_text,
                 max_length=120,
                 min_length=40,
                 do_sample=False,
                 truncation=True
             )
-            summaries.append(summary[0]["summary_text"])
+            summaries.append(result[0]["summary_text"])
         except Exception:
-            # Fail-safe: skip bad chunk instead of crashing
-            continue
+            continue  # fail-safe
 
     if not summaries:
-        return "Unable to summarize this report safely due to length or formatting."
+        return "Unable to safely summarize this report due to formatting or length."
 
-    combined = " ".join(summaries)
+    combined_summary = " ".join(summaries)
 
     # Optional final compression
-    if len(combined.split()) > 160:
+    if len(combined_summary.split()) > 160:
         try:
             final = summarizer(
-                combined,
+                combined_summary,
                 max_length=120,
                 min_length=50,
                 do_sample=False,
@@ -123,9 +114,9 @@ def summarize_large_report(text):
             )
             return final[0]["summary_text"]
         except Exception:
-            return combined
+            return combined_summary
 
-    return combined
+    return combined_summary
 
 # --------------------------------------------------
 # UI
@@ -139,21 +130,27 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
+st.info(
+    "Large medical reports are automatically cleaned and summarized in parts "
+    "to ensure accuracy and stability."
+)
+
 st.markdown("---")
 
-text = st.text_area(
+raw_text = st.text_area(
     "Paste a medical report below",
-    height=260,
-    placeholder="You can paste long lab reports, discharge summaries, or diagnostic notes..."
+    height=280,
+    placeholder="You can paste long lab reports, discharge summaries, legal or diagnostic notes..."
 )
 
 if st.button("Analyze Report"):
-    if not text.strip():
+    if not raw_text.strip():
         st.warning("Please paste a medical report to analyze.")
     else:
-        with st.spinner("Analyzing report (large documents may take a moment)..."):
-            entities = extract_entities(text)
-            summary = summarize_large_report(text)
+        with st.spinner("Analyzing report (this may take a moment for large documents)..."):
+            cleaned_text = normalize_text(raw_text)
+            entities = extract_entities(cleaned_text)
+            summary = summarize_large_report(cleaned_text)
 
         # -------------------------
         # Entities Section
@@ -194,3 +191,9 @@ if st.button("Analyze Report"):
         # Disclaimer
         # -------------------------
         st.info(DISCLAIMER)
+
+        # -------------------------
+        # Debug (optional)
+        # -------------------------
+        with st.expander("🔍 View cleaned input text"):
+            st.write(cleaned_text)
