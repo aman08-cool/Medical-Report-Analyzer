@@ -68,36 +68,64 @@ def split_text_into_chunks(text, max_words=MAX_WORDS_PER_CHUNK):
 
 
 def summarize_large_report(text):
-    words = text.split()
-
-    if len(words) < 80:
+    if not text or len(text.split()) < 80:
         return text
 
-    chunks = split_text_into_chunks(text)
     summaries = []
 
-    for chunk in chunks:
-        summary = summarizer(
-            chunk,
-            max_length=SUMMARY_MAX_LEN,
-            min_length=SUMMARY_MIN_LEN,
-            do_sample=False
+    # Tokenizer-aware chunking
+    max_input_tokens = 900  # keep well below 1024
+    tokenizer = summarizer.tokenizer
+
+    inputs = tokenizer(
+        text,
+        return_tensors="pt",
+        truncation=False
+    )
+
+    input_ids = inputs["input_ids"][0]
+
+    for i in range(0, len(input_ids), max_input_tokens):
+        chunk_ids = input_ids[i:i + max_input_tokens]
+
+        chunk_text = tokenizer.decode(
+            chunk_ids,
+            skip_special_tokens=True
         )
-        summaries.append(summary[0]["summary_text"])
 
-    # Final summary pass if text was very large
-    combined_summary = " ".join(summaries)
+        try:
+            summary = summarizer(
+                chunk_text,
+                max_length=120,
+                min_length=40,
+                do_sample=False,
+                truncation=True
+            )
+            summaries.append(summary[0]["summary_text"])
+        except Exception:
+            # Fail-safe: skip bad chunk instead of crashing
+            continue
 
-    if len(combined_summary.split()) > 150:
-        final_summary = summarizer(
-            combined_summary,
-            max_length=SUMMARY_MAX_LEN,
-            min_length=SUMMARY_MIN_LEN,
-            do_sample=False
-        )
-        return final_summary[0]["summary_text"]
+    if not summaries:
+        return "Unable to summarize this report safely due to length or formatting."
 
-    return combined_summary
+    combined = " ".join(summaries)
+
+    # Optional final compression
+    if len(combined.split()) > 160:
+        try:
+            final = summarizer(
+                combined,
+                max_length=120,
+                min_length=50,
+                do_sample=False,
+                truncation=True
+            )
+            return final[0]["summary_text"]
+        except Exception:
+            return combined
+
+    return combined
 
 # --------------------------------------------------
 # UI
