@@ -2,17 +2,19 @@ import streamlit as st
 import spacy
 from transformers import pipeline
 from collections import defaultdict
+import math
 
 # --------------------------------------------------
 # Page config
 # --------------------------------------------------
 st.set_page_config(
     page_title="AI Medical Report Analyzer",
+    page_icon="🧠",
     layout="centered"
 )
 
 # --------------------------------------------------
-# Load models (cached for performance)
+# Load models (cached)
 # --------------------------------------------------
 @st.cache_resource
 def load_models():
@@ -36,6 +38,10 @@ DISCLAIMER = (
 
 TARGET_LABELS = {"DISEASE", "DRUG", "DATE", "PROCEDURE", "ORG"}
 
+MAX_WORDS_PER_CHUNK = 400   # safe for BART
+SUMMARY_MAX_LEN = 120
+SUMMARY_MIN_LEN = 40
+
 # --------------------------------------------------
 # NLP helpers
 # --------------------------------------------------
@@ -50,71 +56,113 @@ def extract_entities(text):
     return entities
 
 
-def summarize_report(text):
-    word_count = len(text.split())
+def split_text_into_chunks(text, max_words=MAX_WORDS_PER_CHUNK):
+    words = text.split()
+    chunks = []
 
-    if word_count < 50:
+    for i in range(0, len(words), max_words):
+        chunk = " ".join(words[i:i + max_words])
+        chunks.append(chunk)
+
+    return chunks
+
+
+def summarize_large_report(text):
+    words = text.split()
+
+    if len(words) < 80:
         return text
 
-    max_len = min(120, word_count // 2)
-    min_len = max(20, min(50, max_len - 10))
+    chunks = split_text_into_chunks(text)
+    summaries = []
 
-    summary = summarizer(
-        text,
-        max_length=max_len,
-        min_length=min_len,
-        do_sample=False
-    )
+    for chunk in chunks:
+        summary = summarizer(
+            chunk,
+            max_length=SUMMARY_MAX_LEN,
+            min_length=SUMMARY_MIN_LEN,
+            do_sample=False
+        )
+        summaries.append(summary[0]["summary_text"])
 
-    return summary[0]["summary_text"]
+    # Final summary pass if text was very large
+    combined_summary = " ".join(summaries)
+
+    if len(combined_summary.split()) > 150:
+        final_summary = summarizer(
+            combined_summary,
+            max_length=SUMMARY_MAX_LEN,
+            min_length=SUMMARY_MIN_LEN,
+            do_sample=False
+        )
+        return final_summary[0]["summary_text"]
+
+    return combined_summary
 
 # --------------------------------------------------
 # UI
 # --------------------------------------------------
-st.title("AI Medical Report Analyzer")
-st.caption(
-    "Extracts key information and generates a simple summary. "
-    "This tool does not provide medical diagnosis."
-)
+st.markdown("""
+<div style="text-align:center; padding:30px 10px;">
+    <h1>🧠 AI Medical Report Analyzer</h1>
+    <p style="color:#b0b0b0; font-size:16px;">
+        Extracts key information and generates a patient-friendly summary
+    </p>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("---")
 
 text = st.text_area(
-    "Paste a medical report below:",
-    height=220,
-    placeholder="Paste the medical report text here..."
+    "Paste a medical report below",
+    height=260,
+    placeholder="You can paste long lab reports, discharge summaries, or diagnostic notes..."
 )
 
 if st.button("Analyze Report"):
     if not text.strip():
         st.warning("Please paste a medical report to analyze.")
     else:
-        with st.spinner("Analyzing report..."):
+        with st.spinner("Analyzing report (large documents may take a moment)..."):
             entities = extract_entities(text)
-            summary = summarize_report(text)
+            summary = summarize_large_report(text)
 
         # -------------------------
         # Entities Section
         # -------------------------
-        st.subheader("Extracted Entities")
+        st.subheader("📌 Extracted Key Information")
 
         if entities:
-            grouped_entities = defaultdict(list)
+            grouped_entities = defaultdict(set)
             for ent, label in entities:
-                grouped_entities[label].append(ent)
+                grouped_entities[label].add(ent)
 
             for label, items in grouped_entities.items():
                 st.markdown(f"**{label}**")
-                st.write(", ".join(sorted(set(items))))
+                st.write(", ".join(sorted(items)))
         else:
             st.write("No relevant entities detected.")
 
         # -------------------------
         # Summary Section
         # -------------------------
-        st.subheader("Patient-Friendly Summary")
-        st.write(summary)
+        st.subheader("📝 Patient-Friendly Summary")
+        st.markdown(
+            f"""
+            <div style="
+                background-color:#ffffff;
+                padding:20px;
+                border-radius:12px;
+                color:#1a1a1a;
+                box-shadow:0 6px 16px rgba(0,0,0,0.15);
+            ">
+                {summary}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
         # -------------------------
         # Disclaimer
         # -------------------------
         st.info(DISCLAIMER)
-
